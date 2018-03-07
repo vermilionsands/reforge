@@ -1,7 +1,14 @@
 (ns vermilionsands.reforge.core
   (:refer-clojure :exclude [deftype])
-  (:import [org.objectweb.asm ClassVisitor Opcodes ClassReader ClassWriter MethodVisitor]
+  (:import [org.objectweb.asm ClassVisitor Opcodes ClassReader ClassWriter MethodVisitor Type]
            [clojure.lang DynamicClassLoader RT]))
+
+(def clojure-asm-type #'clojure.core/asm-type)
+
+;; repackage clojure Type into objectweb Type
+;; maybe switch to clojure asm to simplify things
+(defn asm-type [c]
+  (Type/getType ^String (.getDescriptor ^clojure.asm.Type (clojure-asm-type c))))
 
 ;(defmacro deftype
 ;  [name fields & opts+specs]
@@ -24,8 +31,14 @@
           (.visit cv ver access name sig sname ifaces)))
       0)))
 
-(defn modify-method-access [^ClassReader cr ^ClassWriter cv mname mdesc modifiers]
-  (let [access (int (reduce #(+ %1 (key->modifier %2)) 0 modifiers))]
+(defn- method-types->desc [[ret-class arg-classes]]
+  (Type/getMethodDescriptor
+    (asm-type ret-class)
+    (into-array Type (map asm-type arg-classes))))
+
+(defn modify-method-access [^ClassReader cr ^ClassWriter cv mname types modifiers]
+  (let [access (int (reduce #(+ %1 (key->modifier %2)) 0 modifiers))
+        mdesc (when types (method-types->desc types))]
     (.accept cr
       (proxy [ClassVisitor] [Opcodes/ASM4 cv]
         (visitMethod [_ name desc signature exceptions]
@@ -38,7 +51,6 @@
     (Compiler/writeClassFile cname bytecode))
   (.defineClass ^DynamicClassLoader (deref Compiler/LOADER) cname bytecode nil))
 
-;; add ctor fn generation
 (defn reforge [name & opts]
   (let [{:keys [class-access method-access]} (apply hash-map opts)
         ^String cname (str name)
@@ -47,8 +59,8 @@
     (when class-access
       (modify-class-access cr cv class-access))
     (when method-access
-      (doseq [[mname desc modifiers] method-access]
-        (modify-method-access cr cv mname desc modifiers)))
+      (doseq [[mname types modifiers] method-access]
+        (modify-method-access cr cv mname types modifiers)))
     (let [c (reload cname (.toByteArray cv))]
       (list 'clojure.core/import* (symbol cname))
       c)))
