@@ -1,7 +1,8 @@
 (ns user
   (:require [vermilionsands.reforge.core :as r]
             [types :as t])
-  (:import [java.lang.reflect Modifier]))
+  (:import [types TestType]
+           [java.lang.reflect Modifier]))
 
 (defn is-final? [c]
   (Modifier/isFinal (.getModifiers c)))
@@ -14,3 +15,13 @@
 
 (defn reload! []
   (require 'vermilionsands.reforge.core :reload))
+
+(defn reforge-method []
+  (binding [*compile-files* true
+            *compile-path* "target/"]
+    (r/reforge 'types.TestType :method [["zoom" [String [String]] [:public]]])))
+
+(defn reforge-access []
+  (binding [*compile-files* true
+            *compile-path* "target/"]
+    (r/reforge 'types.TestType :class-access [:public])))
