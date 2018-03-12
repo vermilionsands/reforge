@@ -1,12 +1,30 @@
+;; partially adapted from original clojure gen-class
 (ns vermilionsands.reforge.core
   (:refer-clojure :exclude [deftype])
-  (:import (clojure.asm Opcodes ClassReader ClassWriter ClassVisitor Type)
-           (clojure.asm.commons GeneratorAdapter Method)
-           (clojure.lang Compiler$HostExpr DynamicClassLoader Var IFn)))
+  (:import [clojure.asm Opcodes ClassReader ClassWriter ClassVisitor Type MethodVisitor]
+           [clojure.asm.commons GeneratorAdapter Method]
+           [clojure.lang Compiler$HostExpr DynamicClassLoader Var IFn]))
 
 (def the-class        #'clojure.core/the-class)
 (def add-annotations  #'clojure.core/add-annotations)
 (def asm-type         #'clojure.core/asm-type)
+
+(defn- var-name
+  [s]
+  (Compiler/munge (str s "__var")))
+
+(defn- to-type
+  [^Class c]
+  (Type/getType c))
+
+(defn- to-types
+  [cs]
+  (into-array Type (map to-type cs)))
+
+(def ifn-type (to-type IFn))
+(def obj-type (to-type Object))
+(def var-type (to-type Var))
+(def ex-type  (to-type UnsupportedOperationException))
 
 ;(defmacro deftype
 ;  [name fields & opts+specs]
@@ -27,49 +45,56 @@
   ([default modifiers]
    (int (reduce #(+ %1 (key->modifier %2)) default modifiers))))
 
+(defn accept [^ClassReader cr visitor & [flags]]
+  (.accept cr visitor (or flags 0)))
+
 (defn modify-class-access [^ClassReader cr ^ClassWriter cv modifiers]
   (let [access (compute-access Opcodes/ACC_SUPER modifiers)]
-    (.accept cr
+    (accept cr
       (proxy [ClassVisitor] [Opcodes/ASM4 cv]
         (visit [ver _ name sig sname ifaces]
-          (.visit cv ver access name sig sname ifaces)))
-      0)))
+          (.visit cv ver access name sig sname ifaces))))))
 
-(defn- method-types->desc [[ret-class arg-classes]]
+(defn- method-types->desc [[return-class param-classes]]
   (Type/getMethodDescriptor
-    (asm-type ret-class)
-    (into-array Type (map asm-type arg-classes))))
+    (asm-type return-class)
+    (into-array Type (map asm-type param-classes))))
 
 (defn modify-method-access [^ClassReader cr ^ClassWriter cv mname ptypes modifiers]
   (let [access (compute-access modifiers)
         mdesc (when ptypes (method-types->desc ptypes))]
-    (.accept cr
+    (accept cr
       (proxy [ClassVisitor] [Opcodes/ASM4 cv]
         (visitMethod [_ name desc signature exceptions]
           (when (and (= mname name) (or (nil? mdesc) (= mdesc mname)))
-            (.visitMethod cv access name desc signature exceptions))))
-      0)))
+            (.visitMethod cv access name desc signature exceptions)))))))
 
-;(defn modify-static-block [^ClassReader cr ^ClassWriter cv]
-;  (let [static-block-visitor]))
+;(let [gen (new GeneratorAdapter (+ (. Opcodes ACC_PUBLIC) (. Opcodes ACC_STATIC))
+;               (. Method getMethod "void <clinit> ()")
+;               nil nil cv))))))
+;  (. gen (visitCode))
+;  (doseq [v var-fields]
+;    (. gen push impl-pkg-name)
+;    (. gen push (str prefix v))
+;    (. gen (invokeStatic var-type (. Method (getMethod "clojure.lang.Var internPrivate(String,String)"))))
+;    (. gen putStatic ctype (var-name v) var-type)))
 
-;; taken from original clojure gen-class
-(defn- var-name
-  [s]
-  (Compiler/munge (str s "__var")))
-
-(defn- to-type
-  [^Class c]
-  (Type/getType c))
-
-(defn- to-types
-  [cs]
-  (into-array Type (map to-type cs)))
-
-(def ifn-type (to-type IFn))
-(def obj-type (to-type Object))
-(def var-type (to-type Var))
-(def ex-type  (to-type UnsupportedOperationException))
+(defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix var-fields]
+  (let [mv ^MethodVisitor nil
+        static-block-visitor
+        (proxy [MethodVisitor] [Opcodes/ASM4 mv]
+          (visitCode [_]
+            (.visitCode mv)
+            ;; generate call to intern
+            (doseq [v var-fields]
+              (.visitLdcInsn mv impl-package-name)
+              (.visitLdcInsn mv (str prefix v))
+              (let [m (Method/getMethod "clojure.lang.Var internPrivate(String,String)")]
+                (.visitMethodInsn mv Opcodes/INVOKESTATIC ^Type var-type (.getName m) (.getDescriptor m)))
+              (.visitFieldInsn mv Opcodes/PUTSTATIC (.getInternalName class-type) (var-name v) (.getDescriptor var-type)))))
+        ;(visitMaxs [_ max-stack max-locals]))]))
+        static-init-visitor
+        (proxy [MethodVisitor] [Opcodes/ASM4 mv])]))
 
 (defn- emit-get-var
   [^GeneratorAdapter gen class-type x]
@@ -157,13 +182,6 @@
         (.mark gen end-label)))
     (.returnValue gen)
     (.endMethod gen)))
-
-;(defn add-method [^ClassVisitor cv method-name types modifiers]
-;  (let [access (compute-access modifiers)
-;        desc (method-types->desc types)
-;        mv (.visitMethod cv access method-name desc nil nil))
-;    ;;generate code
-;    (.visitEnd mv)))
 
 (defn reload [class-name bytecode]
   (when *compile-files*
