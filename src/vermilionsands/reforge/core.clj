@@ -60,13 +60,15 @@
     (asm-type return-class)
     (into-array Type (map asm-type param-classes))))
 
+;; probably breaks things as well -> check using javap
 (defn modify-method-access [^ClassReader cr ^ClassWriter cv mname ptypes modifiers]
-  (let [access (compute-access modifiers)
+  (let [maccess (compute-access modifiers)
         mdesc (when ptypes (method-types->desc ptypes))]
     (accept cr
       (proxy [ClassVisitor] [Opcodes/ASM4 cv]
-        (visitMethod [_ name desc signature exceptions]
-          (when (and (= mname name) (or (nil? mdesc) (= mdesc mname)))
+        (visitMethod [access name desc signature exceptions]
+          (if (and (= mname name) (or (nil? mdesc) (= mdesc mname)))
+            (.visitMethod cv maccess name desc signature exceptions)
             (.visitMethod cv access name desc signature exceptions)))))))
 
 (defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix v]
@@ -81,16 +83,18 @@
               (let [m (Method/getMethod "clojure.lang.Var internPrivate(String,String)")]
                 (.visitMethodInsn mv Opcodes/INVOKESTATIC (.getInternalName var-type) (.getName m) (.getDescriptor m)))
               (.visitFieldInsn mv Opcodes/PUTSTATIC (.getInternalName class-type) (var-name v) (.getDescriptor var-type)))))
-            ;(visitMaxs [max-stack max-locals] (.visitMaxs mv (max max-stack 0) (max max-locals 0)))))
+            ;(visitMaxs [max-stack max-locals] ???)
         visited? (volatile! false)
 
         static-init-visitor
         (proxy [ClassVisitor] [Opcodes/ASM4 cv]
           (visitMethod [access name desc signature exceptions]
-            (when (and (= "<clinit>" name) (not @visited?))
-              (let [mv (.visitMethod cv access name desc signature exceptions)]
-                (vreset! visited? true)
-                (static-block-visitor mv))))
+            (let [mv (.visitMethod cv access name desc signature exceptions)]
+              (if (and (= "<clinit>" name) (not @visited?))
+                (do
+                  (vreset! visited? true)
+                  (static-block-visitor mv))
+                mv)))
           (visitEnd []
             (when-not @visited?
               (vreset! visited? true)
@@ -208,9 +212,7 @@
       (doseq [[mname ptypes modifiers] method-access]
         (modify-method-access cr cv mname ptypes modifiers)))
 
-    ;; broken ctor
-    ;; broken call to foo?
-    ;; at least it loads
+    ;; fix package name, ns etc.
     (when method
       (doseq [[mname [rclass pclasses] modifiers] method]
         (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)
@@ -220,6 +222,7 @@
       (println "Default visit")
       (.accept cr cv 0))
 
+    ;; import sucks right now
     (let [c (reload class-name (.toByteArray cv))]
       (list 'clojure.core/import* (symbol class-name))
       c)))
