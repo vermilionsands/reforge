@@ -69,32 +69,39 @@
           (when (and (= mname name) (or (nil? mdesc) (= mdesc mname)))
             (.visitMethod cv access name desc signature exceptions)))))))
 
-;(let [gen (new GeneratorAdapter (+ (. Opcodes ACC_PUBLIC) (. Opcodes ACC_STATIC))
-;               (. Method getMethod "void <clinit> ()")
-;               nil nil cv))))))
-;  (. gen (visitCode))
-;  (doseq [v var-fields]
-;    (. gen push impl-pkg-name)
-;    (. gen push (str prefix v))
-;    (. gen (invokeStatic var-type (. Method (getMethod "clojure.lang.Var internPrivate(String,String)"))))
-;    (. gen putStatic ctype (var-name v) var-type)))
-
-(defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix var-fields]
-  (let [mv ^MethodVisitor nil
-        static-block-visitor
-        (proxy [MethodVisitor] [Opcodes/ASM4 mv]
-          (visitCode [_]
-            (.visitCode mv)
-            ;; generate call to intern
-            (doseq [v var-fields]
+(defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix v]
+  (let [static-block-visitor
+        (fn [mv]
+          (proxy [MethodVisitor] [Opcodes/ASM4 mv]
+            (visitCode []
+              (.visitCode mv)
+              ;; generate calls to intern
               (.visitLdcInsn mv impl-package-name)
               (.visitLdcInsn mv (str prefix v))
               (let [m (Method/getMethod "clojure.lang.Var internPrivate(String,String)")]
-                (.visitMethodInsn mv Opcodes/INVOKESTATIC ^Type var-type (.getName m) (.getDescriptor m)))
+                (.visitMethodInsn mv Opcodes/INVOKESTATIC (.getInternalName var-type) (.getName m) (.getDescriptor m)))
               (.visitFieldInsn mv Opcodes/PUTSTATIC (.getInternalName class-type) (var-name v) (.getDescriptor var-type)))))
-        ;(visitMaxs [_ max-stack max-locals]))]))
+            ;(visitMaxs [max-stack max-locals] (.visitMaxs mv (max max-stack 0) (max max-locals 0)))))
+        visited? (volatile! false)
+
         static-init-visitor
-        (proxy [MethodVisitor] [Opcodes/ASM4 mv])]))
+        (proxy [ClassVisitor] [Opcodes/ASM4 cv]
+          (visitMethod [access name desc signature exceptions]
+            (when (and (= "<clinit>" name) (not @visited?))
+              (let [mv (.visitMethod cv access name desc signature exceptions)]
+                (vreset! visited? true)
+                (static-block-visitor mv))))
+          (visitEnd []
+            (when-not @visited?
+              (vreset! visited? true)
+              (let [mv (.visitMethod cv Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)
+                    mv (static-block-visitor mv)]
+                (.visitCode mv)
+                (.visitInsn mv Opcodes/RETURN)
+                (.visitMaxs mv 0 0)
+                (.visitEnd mv)))
+            (.visitEnd cv)))]
+    (accept cr static-init-visitor)))
 
 (defn- emit-get-var
   [^GeneratorAdapter gen class-type x]
@@ -201,11 +208,16 @@
       (doseq [[mname ptypes modifiers] method-access]
         (modify-method-access cr cv mname ptypes modifiers)))
 
+    ;; broken ctor
+    ;; broken call to foo?
+    ;; at least it loads
     (when method
       (doseq [[mname [rclass pclasses] modifiers] method]
-        (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)))
+        (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)
+        (add-forwarding-var-to-static-block cr cv (Type/getObjectType (.replace class-name "." "/")) (str (ns-name *ns*)) "-" mname)))
 
-    (when-not (or class-access method-access)
+    (when-not (or class-access method method-access)
+      (println "Default visit")
       (.accept cr cv 0))
 
     (let [c (reload class-name (.toByteArray cv))]

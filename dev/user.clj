@@ -8,10 +8,10 @@
   (Modifier/isFinal (.getModifiers c)))
 
 (defn list-methods [c & [s]]
-  (let [xs (map str (vec (.getMethods c)))]
-    (if s
-      (filter #(.contains % s) xs)
-      xs)))
+  (let [xs (map str (vec (.getMethods c)))
+        ys (if s (filter #(.contains % s) xs) xs)]
+    (doseq [m ys]
+      (println m))))
 
 (defn reload! []
   (require 'vermilionsands.reforge.core :reload))
