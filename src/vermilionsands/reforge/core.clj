@@ -26,12 +26,7 @@
 (def var-type (to-type Var))
 (def ex-type  (to-type UnsupportedOperationException))
 
-;(defmacro deftype
-;  [name fields & opts+specs]
-;  (binding [*compile-files* true]
-;    `(clojure.core/deftype ~name ~fields ~@opts+specs)))
-
-(def key->modifier
+(def key->opcode
   {:public    Opcodes/ACC_PUBLIC
    :protected Opcodes/ACC_PROTECTED
    :private   Opcodes/ACC_PRIVATE
@@ -39,37 +34,23 @@
    :abstract  Opcodes/ACC_ABSTRACT
    :final     Opcodes/ACC_FINAL})
 
-(defn compute-access
+(defn sum-opcodes
   ([modifiers]
-   (compute-access 0 modifiers))
+   (sum-opcodes 0 modifiers))
   ([default modifiers]
-   (int (reduce #(+ %1 (key->modifier %2)) default modifiers))))
+   (int (transduce (map key->opcode) + default modifiers))))
 
-(defn accept [^ClassReader cr visitor & [flags]]
+(defn accept [^ClassReader ^ClassVisitor cr visitor & [flags]]
   (.accept cr visitor (or flags 0)))
 
-(defn modify-class-access [^ClassReader cr ^ClassWriter cv modifiers]
-  (let [access (compute-access Opcodes/ACC_SUPER modifiers)]
-    (accept cr
-      (proxy [ClassVisitor] [Opcodes/ASM4 cv]
-        (visit [ver _ name sig sname ifaces]
-          (.visit cv ver access name sig sname ifaces))))))
+(defn accept-and-get [^ClassReader cr ^ClassWriter cw ^ClassVisitor visitor & [flags]]
+  (accept cr visitor flags)
+  (.toByteArray ^ClassWriter cw))
 
-(defn- method-types->desc [[return-class param-classes]]
+(defn- classes->desc [return-class param-classes]
   (Type/getMethodDescriptor
     (asm-type return-class)
     (into-array Type (map asm-type param-classes))))
-
-;; probably breaks things as well -> check using javap
-(defn modify-method-access [^ClassReader cr ^ClassWriter cv mname ptypes modifiers]
-  (let [maccess (compute-access modifiers)
-        mdesc (when ptypes (method-types->desc ptypes))]
-    (accept cr
-      (proxy [ClassVisitor] [Opcodes/ASM4 cv]
-        (visitMethod [access name desc signature exceptions]
-          (if (and (= mname name) (or (nil? mdesc) (= mdesc mname)))
-            (.visitMethod cv maccess name desc signature exceptions)
-            (.visitMethod cv access name desc signature exceptions)))))))
 
 (defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix v]
   (let [static-block-visitor
@@ -95,6 +76,7 @@
                   (vreset! visited? true)
                   (static-block-visitor mv))
                 mv)))
+
           (visitEnd []
             (when-not @visited?
               (vreset! visited? true)
@@ -141,7 +123,7 @@
         param-types       (to-types param-classes)
         return-type ^Type (to-type return-class)
 
-        access            (compute-access modifiers)
+        access            (sum-opcodes modifiers)
         as-static?        ((set modifiers) :static)
 
         method            (Method. method-name return-type param-types)
@@ -194,35 +176,86 @@
     (.returnValue gen)
     (.endMethod gen)))
 
+(defn class-modifier [modifiers]
+  (fn [cv]
+    (let [access (sum-opcodes Opcodes/ACC_SUPER modifiers)]
+      (proxy [ClassVisitor] [Opcodes/ASM4 cv]
+        (visit [ver _ name signature super-name interfaces]
+          (.visit cv ver access name signature super-name interfaces))))))
+
+(defn method-modifier [method-name return-class param-classes modifiers]
+  (let [expected (classes->desc return-class param-classes)]
+    (fn [cv]
+      (proxy [ClassVisitor] [Opcodes/ASM4 cv]
+        (visitMethod [access name desc signature exceptions]
+          (if (and (= method-name name) (= expected desc))
+            (.visitMethod cv (sum-opcodes modifiers) name desc signature exceptions)
+            (.visitMethod cv access name desc signature exceptions)))))))
+
+(defn method-added [method-name return-class param-classes modifiers])
+
+
 (defn reload [class-name bytecode]
   (when *compile-files*
     (Compiler/writeClassFile class-name bytecode))
   (.defineClass ^DynamicClassLoader (deref Compiler/LOADER) class-name bytecode nil))
 
-(defn reforge [name & opts]
-  (let [{:keys [class-access method-access method]} (apply hash-map opts)
-        ^String class-name (str name)
-        cr (ClassReader. class-name)
-        cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)]
+(defn reforge-class [{:keys [name class-access methods-modify methods-add]}]
+  ;;add validation
+  (let [qualified-name (str name)
+        class-name (last (clojure.string/split qualified-name #"\."))
+        cr (ClassReader. ^String qualified-name)
+        cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
+        class-modifier
+        (when class-access (class-modifier class-access))
 
-    (when class-access
-      (modify-class-access cr cv class-access))
+        method-modifiers
+        (for [[method-name [return-class param-classes] access-keys] methods-modify]
+          (method-modifier (str method-name) return-class param-classes access-keys))
 
-    (when method-access
-      (doseq [[mname ptypes modifiers] method-access]
-        (modify-method-access cr cv mname ptypes modifiers)))
+        method-adders
+        (for [[method-name [return-class param-classes] access-keys] methods-add]
+          ;; add implementation
+          (method-adder (str method-name) return-class param-classes access-keys))
+
+        visitor-generators (remove nil? (flatten [class-modifier method-modifiers method-adders]))
+
+        updated-bytecode
+        (reduce
+          (fn [bytes proxy-gen]
+            (let [cr (ClassReader. ^bytes bytes)
+                  cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)]
+              (accept-and-get cr (proxy-gen cv) cv)))
+          (accept-and-get cr cv cv)
+          visitor-generators)]
 
     ;; fix package name, ns etc.
-    (when method
-      (doseq [[mname [rclass pclasses] modifiers] method]
-        (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)
-        (add-forwarding-var-to-static-block cr cv (Type/getObjectType (.replace class-name "." "/")) (str (ns-name *ns*)) "-" mname)))
-
-    (when-not (or class-access method method-access)
-      (println "Default visit")
-      (.accept cr cv 0))
+    ;(when method
+    ;  (doseq [[mname [rclass pclasses] modifiers] method]
+    ;    (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)
+    ;    (add-forwarding-var-to-static-block cr cv (Type/getObjectType (.replace class-name "." "/")) (str (ns-name *ns*)) "-" mname))
 
     ;; import sucks right now
-    (let [c (reload class-name (.toByteArray cv))]
-      (list 'clojure.core/import* (symbol class-name))
-      c)))
+    (reload qualified-name updated-bytecode)
+    name))
+
+;(let [gname name
+;      [interfaces methods opts] (parse-opts+specs opts+specs)
+;      ns-part (namespace-munge *ns*)
+;      classname (symbol (str ns-part "." gname))
+;      hinted-fields fields
+;      fields (vec (map #(with-meta % nil) fields))
+;      [field-args over] (split-at 20 fields)
+;  `(let []
+;     ~(emit-deftype* name gname (vec hinted-fields) (vec interfaces) methods opts)
+;     (import ~classname)
+;     ~(build-positional-factory gname classname fields)
+;     ~classname)
+
+(defmacro reforge [& opts]
+  (let [opts-map (apply hash-map opts)
+        class-name (:name opts-map)]
+    `(do
+       ~(reforge-class opts-map)
+       (import ~class-name)
+       ~class-name)))

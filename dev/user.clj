@@ -14,14 +14,21 @@
       (println m))))
 
 (defn reload! []
-  (require 'vermilionsands.reforge.core :reload))
+  (require 'user :reload))
 
-(defn reforge-method []
+(defn reforge-add-method []
   (binding [*compile-files* true
             *compile-path* "target/"]
-    (r/reforge 'types.TestType :method [["zoom" [String [String]] [:public]]])))
+    (r/reforge-class {:name 'types.TestType :method-add [["zoom" [String [String]] [:public]]]})))
+
+(defn reforge-method []
+  (binding [*compile-files* true]
+           *compile-path* "target/"
+    (r/reforge-class {:name 'types.TestType
+                      :class-access [:public]
+                      :methods-modify [['foo [Object [Object]] [:public :final]]]})))
 
 (defn reforge-access []
   (binding [*compile-files* true
             *compile-path* "target/"]
-    (r/reforge 'types.TestType :class-access [:public])))
+    (r/reforge-class {:name 'types.TestType :class-access [:public]})))
