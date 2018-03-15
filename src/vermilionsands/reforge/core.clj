@@ -26,6 +26,8 @@
 (def var-type (to-type Var))
 (def ex-type  (to-type UnsupportedOperationException))
 
+(defn class-type [s] (Type/getObjectType (.replace s "." "/")))
+
 (def key->opcode
   {:public    Opcodes/ACC_PUBLIC
    :protected Opcodes/ACC_PROTECTED
@@ -51,43 +53,6 @@
   (Type/getMethodDescriptor
     (asm-type return-class)
     (into-array Type (map asm-type param-classes))))
-
-(defn add-forwarding-var-to-static-block [^ClassReader cr ^ClassWriter cv class-type impl-package-name prefix v]
-  (let [static-block-visitor
-        (fn [mv]
-          (proxy [MethodVisitor] [Opcodes/ASM4 mv]
-            (visitCode []
-              (.visitCode mv)
-              ;; generate calls to intern
-              (.visitLdcInsn mv impl-package-name)
-              (.visitLdcInsn mv (str prefix v))
-              (let [m (Method/getMethod "clojure.lang.Var internPrivate(String,String)")]
-                (.visitMethodInsn mv Opcodes/INVOKESTATIC (.getInternalName var-type) (.getName m) (.getDescriptor m)))
-              (.visitFieldInsn mv Opcodes/PUTSTATIC (.getInternalName class-type) (var-name v) (.getDescriptor var-type)))))
-            ;(visitMaxs [max-stack max-locals] ???)
-        visited? (volatile! false)
-
-        static-init-visitor
-        (proxy [ClassVisitor] [Opcodes/ASM4 cv]
-          (visitMethod [access name desc signature exceptions]
-            (let [mv (.visitMethod cv access name desc signature exceptions)]
-              (if (and (= "<clinit>" name) (not @visited?))
-                (do
-                  (vreset! visited? true)
-                  (static-block-visitor mv))
-                mv)))
-
-          (visitEnd []
-            (when-not @visited?
-              (vreset! visited? true)
-              (let [mv (.visitMethod cv Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)
-                    mv (static-block-visitor mv)]
-                (.visitCode mv)
-                (.visitInsn mv Opcodes/RETURN)
-                (.visitMaxs mv 0 0)
-                (.visitEnd mv)))
-            (.visitEnd cv)))]
-    (accept cr static-init-visitor)))
 
 (defn- emit-get-var
   [^GeneratorAdapter gen class-type x]
@@ -115,7 +80,7 @@
     (.visitField cv access name desc nil nil)))
 
 (defn- emit-forwarding-method
-  [cv class-name method-name param-classes return-class modifiers else-gen]
+  [cv class-name method-name return-class param-classes modifiers else-gen]
   (let [class-type        (Type/getObjectType (.replace class-name "." "/"))
         param-metas       (map meta param-classes)
         param-classes     (map the-class param-classes)
@@ -131,11 +96,11 @@
 
         [found-label else-label end-label] (repeatedly 3 #(.newLabel gen))]
 
-    ;; emit var, would also need static init to point to a correct fn
+    ;; emit var
     (emit-forwarding-var cv method-name)
 
     ;; rest of logic from gen-class
-    ;; right now now support for overrides (would it be needed anyway?)
+    ;; right now no support for overrides (would it be needed anyway?)
     (add-annotations gen (meta name))
     (dotimes [i (count param-metas)]
       (add-annotations gen (nth param-metas i) i))
@@ -192,8 +157,42 @@
             (.visitMethod cv (sum-opcodes modifiers) name desc signature exceptions)
             (.visitMethod cv access name desc signature exceptions)))))))
 
-(defn method-added [method-name return-class param-classes modifiers])
+(defn method-adder [class-name impl-package-name prefix method-name return-class param-classes modifiers]
+  (let [class-type (class-type class-name)
+        static-block-visitor
+        (fn [mv]
+          (proxy [MethodVisitor] [Opcodes/ASM4 mv]
+            (visitCode []
+              (.visitCode mv)
+              (.visitLdcInsn mv impl-package-name)
+              (.visitLdcInsn mv (str prefix method-name))
+              (let [m (Method/getMethod "clojure.lang.Var internPrivate(String,String)")]
+                (.visitMethodInsn mv Opcodes/INVOKESTATIC (.getInternalName var-type) (.getName m) (.getDescriptor m)))
+              (.visitFieldInsn mv Opcodes/PUTSTATIC (.getInternalName class-type) (var-name method-name) (.getDescriptor var-type)))))
+             ;check if we need visitMaxs here
+        visited? (volatile! false)]
 
+   (fn [cv]
+     (proxy [ClassVisitor] [Opcodes/ASM4 cv]
+        (visitMethod [access name desc signature exceptions]
+          (let [mv (.visitMethod cv access name desc signature exceptions)]
+            (if (and (= "<clinit>" name) (not @visited?))
+              (do
+                (vreset! visited? true)
+                (static-block-visitor mv))
+              mv)))
+
+        (visitEnd []
+          (when-not @visited?
+            (vreset! visited? true)
+            (let [mv (.visitMethod cv Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)
+                  mv (static-block-visitor mv)]
+              (.visitCode mv)
+              (.visitInsn mv Opcodes/RETURN)
+              (.visitMaxs mv 0 0)
+              (.visitEnd mv)))
+          (emit-forwarding-method cv class-name method-name return-class param-classes modifiers emit-unsupported)
+          (.visitEnd cv))))))
 
 (defn reload [class-name bytecode]
   (when *compile-files*
@@ -204,6 +203,7 @@
   ;;add validation
   (let [qualified-name (str name)
         class-name (last (clojure.string/split qualified-name #"\."))
+        impl-package-name (str *ns*)
         cr (ClassReader. ^String qualified-name)
         cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
         class-modifier
@@ -216,7 +216,7 @@
         method-adders
         (for [[method-name [return-class param-classes] access-keys] methods-add]
           ;; add implementation
-          (method-adder (str method-name) return-class param-classes access-keys))
+          (method-adder qualified-name impl-package-name "" (str method-name) return-class param-classes access-keys))
 
         visitor-generators (remove nil? (flatten [class-modifier method-modifiers method-adders]))
 
@@ -225,32 +225,12 @@
           (fn [bytes proxy-gen]
             (let [cr (ClassReader. ^bytes bytes)
                   cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)]
-              (accept-and-get cr (proxy-gen cv) cv)))
+              (accept-and-get cr cv (proxy-gen cv))))
           (accept-and-get cr cv cv)
           visitor-generators)]
 
-    ;; fix package name, ns etc.
-    ;(when method
-    ;  (doseq [[mname [rclass pclasses] modifiers] method]
-    ;    (emit-forwarding-method cv class-name mname pclasses rclass modifiers emit-unsupported)
-    ;    (add-forwarding-var-to-static-block cr cv (Type/getObjectType (.replace class-name "." "/")) (str (ns-name *ns*)) "-" mname))
-
-    ;; import sucks right now
     (reload qualified-name updated-bytecode)
     name))
-
-;(let [gname name
-;      [interfaces methods opts] (parse-opts+specs opts+specs)
-;      ns-part (namespace-munge *ns*)
-;      classname (symbol (str ns-part "." gname))
-;      hinted-fields fields
-;      fields (vec (map #(with-meta % nil) fields))
-;      [field-args over] (split-at 20 fields)
-;  `(let []
-;     ~(emit-deftype* name gname (vec hinted-fields) (vec interfaces) methods opts)
-;     (import ~classname)
-;     ~(build-positional-factory gname classname fields)
-;     ~classname)
 
 (defmacro reforge [& opts]
   (let [opts-map (apply hash-map opts)

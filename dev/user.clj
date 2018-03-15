@@ -14,12 +14,12 @@
       (println m))))
 
 (defn reload! []
-  (require 'user :reload))
+  (require 'user :reload-all))
 
 (defn reforge-add-method []
   (binding [*compile-files* true
             *compile-path* "target/"]
-    (r/reforge-class {:name 'types.TestType :method-add [["zoom" [String [String]] [:public]]]})))
+    (r/reforge-class {:name 'types.TestType :methods-add [["zoom" [String [String]] [:public]]]})))
 
 (defn reforge-method []
   (binding [*compile-files* true]
