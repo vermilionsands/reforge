@@ -1,6 +1,6 @@
 ;; partially adapted from original clojure gen-class
 (ns vermilionsands.reforge.core
-  (:refer-clojure :exclude [deftype])
+  (:require [clojure.spec.alpha :as s])
   (:import [clojure.asm Opcodes ClassReader ClassWriter ClassVisitor Type MethodVisitor]
            [clojure.asm.commons GeneratorAdapter Method]
            [clojure.lang Compiler$HostExpr DynamicClassLoader Var IFn]))
@@ -40,7 +40,7 @@
   ([modifiers]
    (sum-opcodes 0 modifiers))
   ([default modifiers]
-   (int (transduce (map key->opcode) + default modifiers))))
+   (int (transduce (map #(key->opcode % 0)) + default modifiers))))
 
 (defn accept [^ClassReader ^ClassVisitor cr visitor & [flags]]
   (.accept cr visitor (or flags 0)))
@@ -199,24 +199,42 @@
     (Compiler/writeClassFile class-name bytecode))
   (.defineClass ^DynamicClassLoader (deref Compiler/LOADER) class-name bytecode nil))
 
-(defn reforge-class [{:keys [name class-access methods-modify methods-add]}]
+;; simplify
+{:class
+ {:name 'someName
+  :modifiers [:public :nonfinal]
+  :extends 'someThing
+  :implements [{:name 'someInterface :op :add}
+               {:name 'another       :op :remove}]}
+ :methods [{}]}
+
+{:name            'SomeName
+ :class-modifiers [:public :nonfinal]
+ :extends         'Object
+ :implements      []
+ :methods         []}
+
+(defn reforge-class [opts-map]
   ;;add validation
-  (let [qualified-name (str name)
-        class-name (last (clojure.string/split qualified-name #"\."))
+  (let [{:keys [class-name class-modifiers extends implements methods]} opts-map
+        class-name (str class-name)
+        short-name (last (clojure.string/split class-name #"\."))
         impl-package-name (str *ns*)
-        cr (ClassReader. ^String qualified-name)
+        cr (ClassReader. ^String class-name)
         cv (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
+
         class-modifier
-        (when class-access (class-modifier class-access))
+        (when-not (empty? class-modifiers) (class-modifier class-modifiers))
 
         method-modifiers
-        (for [[method-name [return-class param-classes] access-keys] methods-modify]
-          (method-modifier (str method-name) return-class param-classes access-keys))
+        (for [{:keys [name return-class param-classes method-modifiers op]} methods
+              :when (= :modify op)]
+          (method-modifier (str name) return-class param-classes method-modifiers))
 
         method-adders
-        (for [[method-name [return-class param-classes] access-keys] methods-add]
-          ;; add implementation
-          (method-adder qualified-name impl-package-name "" (str method-name) return-class param-classes access-keys))
+        (for [{:keys [name return-class param-classes method-modifiers op]} methods
+              :when (= :add op)]
+          (method-adder class-name impl-package-name "" (str name) return-class param-classes method-modifiers))
 
         visitor-generators (remove nil? (flatten [class-modifier method-modifiers method-adders]))
 
@@ -229,13 +247,91 @@
           (accept-and-get cr cv cv)
           visitor-generators)]
 
-    (reload qualified-name updated-bytecode)
-    name))
+    (reload class-name updated-bytecode)
+    class-name))
 
-(defmacro reforge [& opts]
-  (let [opts-map (apply hash-map opts)
-        class-name (:name opts-map)]
+(s/def ::arrow
+  (s/cat :key #{:-} :meta any?))
+
+(s/def ::name
+  (s/cat :name symbol? :name-meta (s/? ::arrow)))
+
+(s/def ::arg-vector
+  (s/and
+    vector?
+    (s/* ::name)))
+
+(s/def ::method
+  (s/cat
+    :name symbol?
+    :name-meta (s/? ::arrow)
+    :args (s/? ::arg-vector)
+    :impl (s/? any?)))
+
+(s/def ::opts-or-specs
+  (s/or
+    :implements #(or (class? %) (symbol? %))
+    :opt        (s/cat :opt-key keyword? :opt-val any?)
+    :method     ::method))
+
+(s/def ::modify-type
+  (s/cat :class     ::name
+         :fields    (s/? ::arg-vector)
+         :opts+spec (s/* ::opts-or-specs)))
+
+(defn merge-meta [arrow meta]
+  (merge
+    (reduce
+      (fn [acc x]
+        (conj acc (if (map? x) x {x true})))
+      {}
+      (if (or (nil? arrow) (coll? arrow)) arrow [arrow]))
+    meta))
+
+(defn modifiers [m]
+  (->> m
+    (filter (fn [[k v]] (and (keyword? k) (true? v))))
+    (mapv first)))
+
+(defn parse-method [m]
+  (let [{:keys [name name-meta args impl]} m
+        method-meta (merge-meta (:meta name-meta) (meta name))
+        method-modifiers (modifiers method-meta)
+        op (-> method-meta
+               (select-keys [:add :remove :modify])
+               (#(filter (comp true? second) %))
+               ffirst)
+        return-class (or (:tag method-meta) Object)
+        param-classes (mapv (fn [{:keys [name name-meta]}]
+                              (or (:tag (merge-meta (:meta name-meta) (meta name))) Object))
+                            args)]
+    {:name name
+     :method-modifiers method-modifiers
+     :op op
+     :impl impl
+     :return-class return-class
+     :param-classes param-classes}))
+
+(defn merge-opts [opts]
+  (loop [acc {:methods []} [[k v] & rest :as opts] opts]
+    (if (empty? opts)
+      acc
+      (recur
+        (condp = k
+          :method (update acc :methods conj (parse-method v))
+          acc)
+        rest))))
+
+(defmacro modify-type [& class-spec]
+  (let [{:keys [class fields opts+spec]} (s/conform ::modify-type class-spec)
+        {:keys [methods]} (merge-opts opts+spec)
+        class-name (:name class)
+        class-meta (merge-meta (-> class :name-meta :meta) (meta class-name))
+        class-modifiers (modifiers class-meta)]
     `(do
-       ~(reforge-class opts-map)
+       (reforge-class
+         {:class-name      '~class-name
+          :class-modifiers '~class-modifiers
+          :methods         '~methods})
        (import ~class-name)
        ~class-name)))

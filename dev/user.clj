@@ -16,19 +16,21 @@
 (defn reload! []
   (require 'user :reload-all))
 
-(defn reforge-add-method []
+(defn extend-access []
   (binding [*compile-files* true
             *compile-path* "target/"]
-    (r/reforge-class {:name 'types.TestType :methods-add [["zoom" [String [String]] [:public]]]})))
+    (r/modify-type types.TestType :- [:public])))
 
-(defn reforge-method []
-  (binding [*compile-files* true]
-           *compile-path* "target/"
-    (r/reforge-class {:name 'types.TestType
-                      :class-access [:public]
-                      :methods-modify [['foo [Object [Object]] [:public :final]]]})))
-
-(defn reforge-access []
+(defn extend-method []
   (binding [*compile-files* true
             *compile-path* "target/"]
-    (r/reforge-class {:name 'types.TestType :class-access [:public]})))
+    (r/modify-type types.TestType :- [:public]
+      (^Object foo :- [:modify :public :final] [_ :- Object]))))
+
+(defn extend-add-method []
+  (binding [*compile-files* true
+            *compile-path* "target/"]
+    (r/modify-type types.TestType
+      ;; hint is ignored...
+      (fizz :- [:add :public :final] [x :- Integer]))))
+      ;(buzz :- [_] custom-buzz))))
