@@ -283,7 +283,12 @@
   (merge
     (reduce
       (fn [acc x]
-        (conj acc (if (map? x) x {x true})))
+        (conj acc
+              (cond
+                (map? x) x
+                ;; ugly, required?
+                (or (class? x) (symbol? x)) {:tag x}
+                :else {x true})))
       {}
       (if (or (nil? arrow) (coll? arrow)) arrow [arrow]))
     meta))
