@@ -26,7 +26,10 @@
 (def var-type (to-type Var))
 (def ex-type  (to-type UnsupportedOperationException))
 
-(defn class-type [s] (Type/getObjectType (.replace s "." "/")))
+(defn- replace-dot->slash [s]
+  (.replace s "." "/"))
+
+(defn class-type [s] (Type/getObjectType (replace-dot->slash s)))
 
 (def key->opcode
   {:public    Opcodes/ACC_PUBLIC
@@ -36,16 +39,23 @@
    :abstract  Opcodes/ACC_ABSTRACT
    :final     Opcodes/ACC_FINAL})
 
-(defn sum-opcodes
+(defn- sum-opcodes
   ([modifiers]
    (sum-opcodes 0 modifiers))
   ([default modifiers]
-   (int (transduce (map #(key->opcode % 0)) + default modifiers))))
+   (int (transduce (map #(key->opcode % 0)) + default (set modifiers)))))
 
-(defn accept [^ClassReader ^ClassVisitor cr visitor & [flags]]
+(defn- sum-class-opcodes
+  [modifiers]
+  (let [xs (set (conj modifiers Opcodes/ACC_PUBLIC Opcodes/ACC_SUPER))]
+    (if (contains? xs :nonfinal)
+      (sum-opcodes (disj xs :final))
+      (sum-opcodes (conj xs :final)))))
+
+(defn- accept [^ClassReader ^ClassVisitor cr visitor & [flags]]
   (.accept cr visitor (or flags 0)))
 
-(defn accept-and-get [^ClassReader cr ^ClassWriter cw ^ClassVisitor visitor & [flags]]
+(defn- accept-and-get [^ClassReader cr ^ClassWriter cw ^ClassVisitor visitor & [flags]]
   (accept cr visitor flags)
   (.toByteArray ^ClassWriter cw))
 
@@ -88,7 +98,7 @@
         param-types       (to-types param-classes)
         return-type ^Type (to-type return-class)
 
-        access            (sum-opcodes modifiers)
+        access            (sum-opcodes (if (empty? modifiers) [Opcodes/ACC_PUBLIC] modifiers))
         as-static?        ((set modifiers) :static)
 
         method            (Method. method-name return-type param-types)
@@ -143,7 +153,7 @@
 
 (defn class-modifier [modifiers]
   (fn [cv]
-    (let [access (sum-opcodes Opcodes/ACC_SUPER modifiers)]
+    (let [access (sum-class-opcodes modifiers)]
       (proxy [ClassVisitor] [Opcodes/ASM4 cv]
         (visit [ver _ name signature super-name interfaces]
           (.visit cv ver access name signature super-name interfaces))))))
@@ -157,7 +167,8 @@
             (.visitMethod cv (sum-opcodes modifiers) name desc signature exceptions)
             (.visitMethod cv access name desc signature exceptions)))))))
 
-(defn method-adder [class-name impl-package-name prefix method-name return-class param-classes modifiers]
+;; todo - pass only impl-package + impl-name, remove prefix, method-name
+(defn method-adder [class-name impl-package-name prefix impl method-name return-class param-classes modifiers]
   (let [class-type (class-type class-name)
         static-block-visitor
         (fn [mv]
@@ -196,23 +207,8 @@
 
 (defn reload [class-name bytecode]
   (when *compile-files*
-    (Compiler/writeClassFile class-name bytecode))
-  (.defineClass ^DynamicClassLoader (deref Compiler/LOADER) class-name bytecode nil))
-
-;; simplify
-{:class
- {:name 'someName
-  :modifiers [:public :nonfinal]
-  :extends 'someThing
-  :implements [{:name 'someInterface :op :add}
-               {:name 'another       :op :remove}]}
- :methods [{}]}
-
-{:name            'SomeName
- :class-modifiers [:public :nonfinal]
- :extends         'Object
- :implements      []
- :methods         []}
+    (Compiler/writeClassFile (replace-dot->slash class-name) bytecode))
+  (.defineClass ^DynamicClassLoader (clojure.lang.RT/makeClassLoader) class-name bytecode nil))
 
 (defn reforge-class [opts-map]
   ;;add validation
@@ -232,9 +228,9 @@
           (method-modifier (str name) return-class param-classes method-modifiers))
 
         method-adders
-        (for [{:keys [name return-class param-classes method-modifiers op]} methods
+        (for [{:keys [name return-class param-classes method-modifiers op prefix impl]} methods
               :when (= :add op)]
-          (method-adder class-name impl-package-name "" (str name) return-class param-classes method-modifiers))
+          (method-adder class-name impl-package-name prefix impl (str name) return-class param-classes method-modifiers))
 
         visitor-generators (remove nil? (flatten [class-modifier method-modifiers method-adders]))
 
@@ -333,10 +329,10 @@
         class-name (:name class)
         class-meta (merge-meta (-> class :name-meta :meta) (meta class-name))
         class-modifiers (modifiers class-meta)]
-    `(do
+    `(let []
        (reforge-class
-         {:class-name      '~class-name
-          :class-modifiers '~class-modifiers
-          :methods         '~methods})
+         {:class-name      ~(str class-name)
+          :class-modifiers ~class-modifiers
+          :methods         ~methods})
        (import ~class-name)
        ~class-name)))

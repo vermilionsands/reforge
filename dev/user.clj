@@ -4,6 +4,8 @@
   (:import [types TestType]
            [java.lang.reflect Modifier]))
 
+(deftype CustomType [x])
+
 (defn is-final? [c]
   (Modifier/isFinal (.getModifiers c)))
 
@@ -16,21 +18,21 @@
 (defn reload! []
   (require 'user :reload-all))
 
-(defn extend-access []
-  (binding [*compile-files* true
-            *compile-path* "target/"]
-    (r/modify-type types.TestType :- [:public])))
+;(defn extend-access []
+;  (binding [*compile-files* true
+;            *compile-path* "target/"
+;    (r/modify-type types.TestType :- [:public])))
 
-(defn extend-method []
-  (binding [*compile-files* true
-            *compile-path* "target/"]
-    (r/modify-type types.TestType :- [:public]
-      (^Object foo :- [:modify :public :final] [_ :- Object]))))
+;(defn extend-method []
+;  (binding [*compile-files* true
+;            *compile-path* "target/"
+;    (r/modify-type types.TestType :- [:public]
+;      (^Object foo :- [:modify :public :final] [_ :- Object])))
 
-(defn extend-add-method []
-  (binding [*compile-files* true
-            *compile-path* "target/"]
-    (r/modify-type types.TestType
-      ;; hint is ignored...
-      (fizz :- [:add :public :final] [x :- Integer]))))
-      ;(buzz :- [_] custom-buzz))))
+;(defn extend-add-method []
+;  (binding [*compile-files* true
+;            *compile-path* "target/"
+;    (r/modify-type types.TestType
+;      (fizz :- [:add :public :final] [x :- Integer])
+;      (buzz :- [:add :public] [x] custom-buzz)))
+      ;(buzz :- [:add] [x] custom-buzz))))

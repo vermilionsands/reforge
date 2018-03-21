@@ -1,4 +1,5 @@
-(ns types)
+(ns types
+ (:gen-class))
 
 (definterface TestInterface
   (foo [x]))
