@@ -1,24 +1,33 @@
 (ns vermilionsands.reforge.core-test
   (:require [clojure.test :refer [is deftest]]
-            [vermilionsands.reforge.core :as r])
+            [vermilionsands.reforge.experimental :as r])
   (:import [java.lang.reflect Modifier]))
 
-(deftype FinalType [x])
+;(defprotocol Fizz)
+;  (fizz [this n]))
 
-(deftype NonFinalType [x])
+;(deftype FinalType [x])
 
-(r/modify-type
-  vermilionsands.reforge.core_test.FinalType :- [:public])
+;(deftype NonFinalType [x]
+;  Fizz
+;  (fizz [_ n] (if (zero? (mod n 3)) "fizz" n)))
 
-(r/modify-type
-  vermilionsands.reforge.core_test.NonFinalType :- [:public :nonfinal])
+;(r/modify-type FinalType #{:public})
 
-(defn final-class? [c]
-  (Modifier/isFinal (.getModifiers c)))
+;(r/modify-type NonFinalType #{:public :nonfinal}
+;  (fizz :modify #{:public :synchronized :final} [_]))
 
-(deftest make-type-non-final
-  (is (true?  (final-class? vermilionsands.reforge.core_test.FinalType)))
-  (is (false? (final-class? vermilionsands.reforge.core_test.NonFinalType))))
+;(defn final-class? [c]
+;  (Modifier/isFinal (.getModifiers c)))
+
+;(deftest make-type-non-final-test
+;  (is (true?  (final-class? FinalType)))
+;  (is (false? (final-class? NonFinalType))))
+
+;(deftest modify-method-access-test
+;  (.getDeclaredMethod NonFinalType)
+;  (is false))
+
 
 ;(r/modify-type 'SampleType :- [:public :nonfinal]
 ;  (foo       :- [:mod :public :final :synchronized])

@@ -4,5 +4,6 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.9.0"]]
-  :profiles {:dev  {:source-paths ["dev"]}
-             :test {:aot [vermilionsands.reforge.core-test]}})
+  :profiles {:dev  {:source-paths ["dev"]
+                    :aot [types]}
+             :test {:aot [vermilionsands.reforge.reforge-test]}})
