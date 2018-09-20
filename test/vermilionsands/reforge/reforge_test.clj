@@ -4,7 +4,9 @@
   ;; -> this should not be required
   (:gen-class))
 
-(reforge/defdata Point [x y])
+;(reforge/defdata Point [x y])
+(deftype Point [x y])
+(reforge/as-data Point)
 
 (deftest defdata-basic-test
   (let [x (->Point 1 2)]
@@ -19,22 +21,17 @@
     (is (= nil (.y x)))))
 
 (deftest instances-type-match-test
-  (let [x (Point.)
+  (let [x (nil->Point)
         y (->Point 1 2)]
      (is (= (.getClass x)
             (.getClass y)))))
 
-;(deftest factory-test
-;  (testing "no-arg factory fn"
-;    (let [x (->Point0)]
-;      (is (some? x))
-;      (is (= nil (.x x)))
-;      (is (= nil (.y x))))))
- ;(testing "positionial factory fn"
- ;  (let [x (->Point)
- ;        y (->Point 1 2))
- ;    (is (= (.getClass x)
- ;           (.getClass y))))))
+(deftest factory-test
+  (testing "no-arg factory fn"
+    (let [x (nil->Point)]
+      (is (some? x))
+      (is (= nil (.x x)))
+      (is (= nil (.y x))))))
 
 ;(deftest fields-are-mutable-test
 ;  (let [x (->TestPoint 1 2)]

@@ -4,12 +4,11 @@
 
 ;; 1. OK defdata
 ;; 2. OK deftype + noarg ctor
-;; 3. all mutable public field
-;; 4. change types internally
-;; 5. positionial factories
+;; 3. OK positionial factories
+;; 4. all mutable public field
+;; 5. change types internally
 
 (def emit-deftype* #'clojure.core/emit-deftype*)
-
 (def build-positional-factory #'clojure.core/build-positional-factory)
 
 (defn- replace-dot->slash [s]
@@ -21,7 +20,6 @@
   (.defineClass ^DynamicClassLoader (RT/makeClassLoader) class-name bytecode nil))
 
 (defn add-no-args-ctor [class-name]
-  (println "Noarg ctor")
   (when (and (Class/forName class-name)
              (nil?
                (try
@@ -41,26 +39,45 @@
       (let [updated-bytecode (.toByteArray cw)]
         (reload class-name updated-bytecode)))))
 
+;; todo -> catch old function
+;; todo -> replace with defn
 (defmacro build-no-args-factory [name class-name]
-  (println "Def no args ctor")
-  (let [fn-name (symbol (str '-> name "0"))
+  (let [fn-name   (symbol (str 'nil-> name))
         docstring (str "Positional factory function for class " class-name ".")]
-    (println "Ctor name: " fn-name)
     `(defn ~fn-name ~docstring [] (new ~class-name))))
 
+;; workaround, though this works
+(defmacro as-data [name]
+  (let [ns-part (namespace-munge *ns*)
+        class-name (symbol (str ns-part "." name))]
+    `(do
+       ~(add-no-args-ctor (clojure.core/name class-name))
+       (build-no-args-factory ~name ~class-name)
+
+       (import ~class-name)
+       ~class-name)))
+
+;; todo
+;; maybe replace classloader for the first deftype calls?
+;; or split this into two calls - one for deftype, one for modification
+;; otherwise we can;t get the bytecode to manipulate
 (defmacro defdata [name fields]
   (let [fields-count (count fields)
         ns-part (namespace-munge *ns*)
         class-name (symbol (str ns-part "." name))]
-
     ;; todo -> force deftype to output class to disk?
     ;; or capture bytes from deftype for later reworking
     ;; (that would be tricky...)
     `(do
        ~(emit-deftype* name name fields [] [] [])
        ~(build-positional-factory name class-name fields)
-       (when (pos? ~fields-count)
-         ;; would get called two times...
-         (add-no-args-ctor (.getCanonicalName ~class-name)))
+       ~(when (pos? fields-count)
+          ~(add-no-args-ctor (clojure.core/name class-name))
+          (build-no-args-factory ~name ~class-name))
+          ;(add-no-args-ctor (.getCanonicalName ~class-name)))
+          ;;(add-no-args-ctor (clojure.core/name class-name)))
+         ;; would have to happen in add-no-arg-ctor
+         ;; (defn ~no-arg-ctor-name [] (new ~class-name)))
+
        (import ~class-name)
        ~class-name)))
