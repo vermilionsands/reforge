@@ -1,7 +1,8 @@
 (ns vermilionsands.reforge
+  (:require [clojure.java.io :as io])
   (:import [clojure.asm ClassReader ClassWriter Opcodes]
            [clojure.lang RT DynamicClassLoader Compiler Compiler$C Compiler$ObjExpr]
-           [java.io ByteArrayInputStream InputStream]))
+           [java.io ByteArrayInputStream InputStream ByteArrayOutputStream]))
 
 (defn ^bytes eval-deftype
   "Custom eval for `deftype*` calls. Returns bytecode as byte array
@@ -24,38 +25,42 @@
     (Compiler/writeClassFile (replace-dot->slash class-name) bytecode))
   (.defineClass ^DynamicClassLoader (RT/makeClassLoader) class-name bytecode nil))
 
-(defn add-no-args-ctor
+(defn class-valid? [class-name]
+  (and
+    (Class/forName class-name)
+    (nil?
+      (try
+        (.getConstructor (Class/forName class-name) (into-array Class []))
+        (catch NoSuchMethodException _ nil)))))
+
+(defn ^bytes class->byte-array [class-name]
+  (with-open [is (ClassLoader/getSystemResourceAsStream
+                   (str (clojure.string/replace class-name #"\." "/") ".class"))
+              os (ByteArrayOutputStream.)]
+    (io/copy is os)
+    (.toByteArray os)))
+
+(defn- add-no-args-ctor
   ([class-name]
-   (add-no-args-ctor class-name nil))
+   (when (class-valid? class-name)
+     (add-no-args-ctor class-name (class->byte-array class-name))))
   ([class-name bytecode]
-   ;; todo -> add validation check that class-name can
-   ;; be read with ClassReader
+   (let [cr (with-open [is (ByteArrayInputStream. bytecode)]
+              (ClassReader. ^InputStream is))
+         cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
+         mv (.visitMethod cw Opcodes/ACC_PUBLIC "<init>" "()V" nil nil)]
+     (.visitCode mv)
+     (.visitVarInsn mv Opcodes/ALOAD 0)
+     (.visitMethodInsn mv Opcodes/INVOKESPECIAL "java/lang/Object" "<init>" "()V")
+     (.visitInsn mv Opcodes/RETURN)
+     (.visitMaxs mv 1 1)
+     (.visitEnd mv)
 
-   ;; could be removed once there's guarantee that this would be called
-   ;; only once
-   ;;
-   (when (or (some? bytecode)
-             (and (Class/forName class-name)
-                (nil?
-                  (try
-                    (.getConstructor (Class/forName class-name) (into-array Class []))
-                    (catch NoSuchMethodException _ nil)))))
-     (let [cr (if bytecode
-                (with-open [is (ByteArrayInputStream. bytecode)]
-                  (ClassReader. ^InputStream is))
-                (ClassReader. ^String class-name))
-           cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
-           mv (.visitMethod cw Opcodes/ACC_PUBLIC "<init>" "()V" nil nil)]
-       (.visitCode mv)
-       (.visitVarInsn mv Opcodes/ALOAD 0)
-       (.visitMethodInsn mv Opcodes/INVOKESPECIAL "java/lang/Object" "<init>" "()V")
-       (.visitInsn mv Opcodes/RETURN)
-       (.visitMaxs mv 1 1)
-       (.visitEnd mv)
+     (.accept cr cw 0)
 
-       (.accept cr cw 0)
-       (let [updated-bytecode (.toByteArray cw)]
-         (reload class-name updated-bytecode))))))
+     ;; todo -> return bytecode, reload somewhere elese
+     (let [updated-bytecode (.toByteArray cw)]
+       (reload class-name updated-bytecode)))))
 
 ;; todo -> merge with other positional factory
 (defn build-no-args-factory [cname class-name]
@@ -82,8 +87,8 @@
             (name class-name)
             (eval-deftype
               (list 'deftype* cname class-name fields :implements ['clojure.lang.IType])))
-          ; alternative: (first (next (next (macroexpand '(deftype ~name ~fields)))))))
-            ;; replace with plain deftype call
+              ; alternative: (first (next (next (macroexpand '(deftype ~name ~fields)))))))
+          ; replace with plain deftype call
           (emit-deftype* cname class-name fields [] [] []))
        ~(build-positional-factory cname class-name fields)
        ~(when (pos? fields-count)
