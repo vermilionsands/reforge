@@ -1,12 +1,8 @@
-(ns vermilionsands.reforge.reforge-test
+(ns vermilionsands.reforge-test
   (:require [clojure.test :refer [deftest is testing]]
-            [vermilionsands.reforge :as reforge])
-  ;; -> this should not be required
-  (:gen-class))
+            [vermilionsands.reforge :as reforge]))
 
-;(reforge/defdata Point [x y])
-(deftype Point [x y])
-(reforge/as-data Point)
+(reforge/defdata Point [x y])
 
 (deftest defdata-basic-test
   (let [x (->Point 1 2)]
@@ -23,8 +19,8 @@
 (deftest instances-type-match-test
   (let [x (nil->Point)
         y (->Point 1 2)]
-     (is (= (.getClass x)
-            (.getClass y)))))
+    (is (= (.getClass x)
+           (.getClass y)))))
 
 (deftest factory-test
   (testing "no-arg factory fn"
@@ -32,11 +28,3 @@
       (is (some? x))
       (is (= nil (.x x)))
       (is (= nil (.y x))))))
-
-;(deftest fields-are-mutable-test
-;  (let [x (->TestPoint 1 2)]
-;    (set! (.x x) 2)
-;    (set! (.y x) 2)
-;    (is (= 2 (.x x)))
-;    (is (= 3 (.y x)))))
-
