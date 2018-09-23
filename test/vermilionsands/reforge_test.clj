@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [vermilionsands.reforge :as reforge]))
 
-(reforge/defdata Point [x y])
+(reforge/defdata Point [^Long x y])
 
 (deftest defdata-basic-test
   (let [x (->Point 1 2)]
@@ -35,3 +35,7 @@
     (set! (.y x) 2)
     (is (= 1 (.x x)))
     (is (= 2 (.y x)))))
+
+(deftest fields-are-typed-test
+  (is (= Long (.getType (.getField Point "x"))))
+  (is (= Object (.getType (.getField Point "y")))))

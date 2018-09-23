@@ -7,7 +7,7 @@
 ;; this requires AOT compilation to generate Point.class file
 (deftype Point [x y])
 (reforge/as-data Point)
-(reforge/defdata AnotherPoint [x y])
+(reforge/defdata AnotherPoint [^Long x y])
 
 (deftest defdata-basic-test
   (testing "as-data basic test"

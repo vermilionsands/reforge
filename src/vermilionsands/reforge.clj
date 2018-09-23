@@ -1,7 +1,7 @@
 (ns vermilionsands.reforge
   (:require [clojure.java.io :as io])
-  (:import [clojure.asm ClassReader ClassWriter Opcodes ClassVisitor]
-           [clojure.lang RT DynamicClassLoader Compiler Compiler$C Compiler$ObjExpr]
+  (:import [clojure.asm ClassReader ClassWriter Opcodes ClassVisitor Type MethodVisitor]
+           [clojure.lang RT DynamicClassLoader Compiler Compiler$C Compiler$ObjExpr Namespace]
            [java.io ByteArrayInputStream InputStream ByteArrayOutputStream]
            [java.lang.reflect Field]))
 
@@ -33,24 +33,85 @@
     (io/copy is os)
     (.toByteArray os)))
 
-(defn- make-fields-mutable [bytecode fields]
+(defn- ^Class resolve-classname [sym]
+  (let [cname (name sym)]
+    (try
+      (if (> (.indexOf cname ".") 0)
+        (RT/classForName cname)
+        (let [c (.getMapping ^Namespace *ns* sym)]
+          (if (class? c)
+            c
+            (RT/classForName cname))))
+      (catch Exception _ Object))))
+
+(defn resolve-hint [hint]
+  (cond
+    (symbol? hint)
+    (-> hint resolve-classname Type/getType)
+
+    (instance? Class hint)
+    (Type/getType ^Class hint)
+
+    ;; todo
+    ;; handle Strings and specials here
+
+    :else
+    (Type/getType ^Class Object)))
+
+(defn- hint->desc [hint]
+  (.getDescriptor (resolve-hint hint)))
+
+(defn- hint->internal-name [hint]
+  (.getInternalName (resolve-hint hint)))
+
+(defn- class-reader [^bytes bytecode]
+  (with-open [is (ByteArrayInputStream. bytecode)]
+    (ClassReader. ^InputStream is)))
+
+(defn- ^bytes accept-and-get [^ClassReader cr ^ClassWriter cw ^ClassVisitor cv]
+  (.accept cr cv 0)
+  (.toByteArray cw))
+
+(defn- modify-fields [bytecode fields]
   (let [fields-set (into #{} (map name fields))
-        cr (with-open [is (ByteArrayInputStream. bytecode)]
-             (ClassReader. ^InputStream is))
+        field->hint-mapping (reduce
+                              #(assoc %1 (name %2) (:tag (meta %2)))
+                              {} fields)
+        ;;  todo -> extract this up
+        cr (class-reader bytecode)
         cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
+        ;;
+        field-call-replacer
+        (fn [mv]
+          (proxy [MethodVisitor] [Opcodes/ASM4 mv]
+            (visitFieldInsn [opcode owner fname desc]
+              (if (and (= opcode Opcodes/PUTFIELD)
+                       (fields-set fname)
+                       (not= (hint->desc (field->hint-mapping fname))
+                             desc))
+                (do
+                  ;; instead of doing checkcast
+                  ;; ctor could be changed
+                  ;; or do this as well!
+                  (.visitTypeInsn mv Opcodes/CHECKCAST (hint->internal-name (field->hint-mapping fname)))
+                  (.visitFieldInsn mv opcode owner fname (hint->desc (field->hint-mapping fname))))
+                (.visitFieldInsn mv opcode owner fname desc)))))
+
         fv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
              (visitField [access fname desc sig value]
                (if (fields-set fname)
-                 (.visitField cw Opcodes/ACC_PUBLIC fname desc sig value)
+                 (let [new-desc (hint->desc (field->hint-mapping fname))]
+                   (.visitField cw Opcodes/ACC_PUBLIC fname new-desc sig value))
                  (.visitField cw access fname desc sig value)))
-             (visitEnd []
-               (.visitEnd cw)))]
-    (.accept cr fv 0)
-    (.toByteArray cw)))
+
+             (visitMethod [access mname desc sig exceptions]
+               (let [v (.visitMethod cw access mname desc sig exceptions)]
+                 (field-call-replacer v))))]
+    ;; need second call here or move changing method to another call
+    (accept-and-get cr cw fv)))
 
 (defn- add-no-args-ctor [bytecode]
-  (let [cr (with-open [is (ByteArrayInputStream. bytecode)]
-             (ClassReader. ^InputStream is))
+  (let [cr (class-reader bytecode)
         cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
         present? (volatile! false)
         mv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
@@ -69,8 +130,7 @@
                    (.visitMaxs mv 1 1)
                    (.visitEnd mv)))
                (.visitEnd cw)))]
-    (.accept cr mv 0)
-    (.toByteArray cw)))
+    (accept-and-get cr cw mv)))
 
 (defn modify-bytecode
   ([class-name]
@@ -83,7 +143,7 @@
    (let [modified-bytecode
          (-> bytecode
               (add-no-args-ctor)
-              (make-fields-mutable fields))]
+              (modify-fields fields))]
      (reload class-name modified-bytecode))))
 
 ;; todo -> merge with other positional factory
@@ -96,12 +156,19 @@
   (let [ns-part (namespace-munge *ns*)
         class-name (symbol (str ns-part "." cname))]
     `(do
+       ;; todo -> check if needed
        ~(modify-bytecode (name class-name))
        ~(build-no-args-factory cname class-name)
        (import ~class-name)
        ~class-name)))
 
-(defmacro defdata [cname fields]
+(defmacro defdata
+  "A variation over `deftype`.
+
+  Defines a class with name `cname` and `fields`.
+  Fields would be mutable and additional no-arg ctor
+  would be added. "
+  [cname fields]
   (let [fields-count (count fields)
         ns-part (namespace-munge *ns*)
         class-name (symbol (str ns-part "." cname))]
