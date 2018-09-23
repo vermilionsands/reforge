@@ -4,10 +4,9 @@
   (:require [clojure.test :refer [deftest is testing]]
             [vermilionsands.reforge :as reforge]))
 
-;; this requires :aot to generate Point .class file
+;; this requires AOT compilation to generate Point.class file
 (deftype Point [x y])
 (reforge/as-data Point)
-
 (reforge/defdata AnotherPoint [x y])
 
 (deftest defdata-basic-test
@@ -58,10 +57,10 @@
       (is (= nil (.x x)))
       (is (= nil (.y x))))))
 
-;(deftest fields-are-mutable-test
-;  (let [x (->TestPoint 1 2)]
-;    (set! (.x x) 2)
-;    (set! (.y x) 2)
-;    (is (= 2 (.x x)))
-;    (is (= 3 (.y x)))))
+(deftest fields-are-mutable-test
+  (let [x (->Point 1 2)]
+    (set! (.x x) 2)
+    (set! (.y x) 3)
+    (is (= 2 (.x x)))
+    (is (= 3 (.y x)))))
 

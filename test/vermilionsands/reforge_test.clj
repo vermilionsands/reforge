@@ -28,3 +28,10 @@
       (is (some? x))
       (is (= nil (.x x)))
       (is (= nil (.y x))))))
+
+(deftest fields-are-mutable-test
+  (let [x (nil->Point)]
+    (set! (.x x) 1)
+    (set! (.y x) 2)
+    (is (= 1 (.x x)))
+    (is (= 2 (.y x)))))
