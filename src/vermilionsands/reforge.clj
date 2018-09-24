@@ -33,6 +33,27 @@
     (io/copy is os)
     (.toByteArray os)))
 
+(def special-hints
+  (let [array-class (fn [c] (.getClass (make-array c 0)))]
+    {'objects  (array-class Object)
+     'ints     (array-class Integer/TYPE)
+     'longs    (array-class Long/TYPE)
+     'floats   (array-class Float/TYPE)
+     'doubles  (array-class Double/TYPE)
+     'chars    (array-class Character/TYPE)
+     'shorts   (array-class Short/TYPE)
+     'bytes    (array-class Byte/TYPE)
+     'booleans (array-class Boolean/TYPE)
+     'int      Integer/TYPE
+     'long     Long/TYPE
+     'float    Float/TYPE
+     'double   Double/TYPE
+     'char     Character/TYPE
+     'short    Short/TYPE
+     'byte     Byte/TYPE
+     'boolean  Boolean/TYPE
+     'void     Void/TYPE}))
+
 (defn- ^Class resolve-classname [sym]
   (let [cname (name sym)]
     (try
@@ -46,14 +67,14 @@
 
 (defn resolve-hint [hint]
   (cond
-    (symbol? hint)
+    (special-hints hint)
+    (Type/getType ^Class (special-hints hint))
+
+    (or (symbol? hint) (string? hint))
     (-> hint resolve-classname Type/getType)
 
     (instance? Class hint)
     (Type/getType ^Class hint)
-
-    ;; todo
-    ;; handle Strings and specials here
 
     :else
     (Type/getType ^Class Object)))
@@ -81,7 +102,7 @@
         cr (class-reader bytecode)
         cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
         ;;
-        field-call-replacer
+        field-insn-replacer
         (fn [mv]
           (proxy [MethodVisitor] [Opcodes/ASM4 mv]
             (visitFieldInsn [opcode owner fname desc]
@@ -97,7 +118,7 @@
                   (.visitFieldInsn mv opcode owner fname (hint->desc (field->hint-mapping fname))))
                 (.visitFieldInsn mv opcode owner fname desc)))))
 
-        fv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
+        cv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
              (visitField [access fname desc sig value]
                (if (fields-set fname)
                  (let [new-desc (hint->desc (field->hint-mapping fname))]
@@ -105,16 +126,16 @@
                  (.visitField cw access fname desc sig value)))
 
              (visitMethod [access mname desc sig exceptions]
-               (let [v (.visitMethod cw access mname desc sig exceptions)]
-                 (field-call-replacer v))))]
+               (let [mv (.visitMethod cw access mname desc sig exceptions)]
+                 (field-insn-replacer mv))))]
     ;; need second call here or move changing method to another call
-    (accept-and-get cr cw fv)))
+    (accept-and-get cr cw cv)))
 
 (defn- add-no-args-ctor [bytecode]
   (let [cr (class-reader bytecode)
         cw (ClassWriter. cr ClassWriter/COMPUTE_MAXS)
         present? (volatile! false)
-        mv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
+        cv (proxy [ClassVisitor] [Opcodes/ASM4 cw]
              (visitMethod [access mname desc sig exceptions]
                (when (and (= "<init>" mname)
                           (= "()V" desc))
@@ -130,7 +151,7 @@
                    (.visitMaxs mv 1 1)
                    (.visitEnd mv)))
                (.visitEnd cw)))]
-    (accept-and-get cr cw mv)))
+    (accept-and-get cr cw cv)))
 
 (defn modify-bytecode
   ([class-name]
@@ -156,7 +177,7 @@
   (let [ns-part (namespace-munge *ns*)
         class-name (symbol (str ns-part "." cname))]
     `(do
-       ;; todo -> check if needed
+       ;; todo -> check if building no-args-factory is needed
        ~(modify-bytecode (name class-name))
        ~(build-no-args-factory cname class-name)
        (import ~class-name)
